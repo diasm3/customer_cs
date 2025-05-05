@@ -6,7 +6,7 @@ from langchain_core.runnables import RunnableConfig
 from typing_extensions import Annotated
 from dataclasses import dataclass
 
-from personas.company_personas import (
+from data.personas.company_personas import (
     get_persona_by_id, 
     get_persona_prompt, 
     list_available_personas,

@@ -30,8 +30,9 @@ from graphDB.neo4j import (
 # MCP Client import
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
+
 # 기업 페르소나 모듈 임포트
-from personas.company_personas import (
+from data.personas.company_personas import (
     get_persona_by_id, 
     get_persona_prompt, 
     list_available_personas,
@@ -39,8 +40,8 @@ from personas.company_personas import (
     get_scenario
 )
 
-
-import configuration
+# 절대 경로로 configuration 모듈 임포트
+import agents.configuration as configuration
 
 
 

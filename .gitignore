@@ -1,2 +1,7 @@
 **/.claude/settings.local.json
+./langgraph_api/**
 .env
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
