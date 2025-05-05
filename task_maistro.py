@@ -193,7 +193,7 @@ async def task_mAIstro_with_tools(state: MessagesState, config: RunnableConfig, 
     """Enhanced version of task_mAIstro that can use MCP tools."""
     
     # Get the user ID from the config
-    configurable = configuration.Configuration.from_runnable_config(config)
+    configurable = configuration.PersonaConfiguration.from_runnable_config(config)
     user_id = configurable.user_id
     todo_category = configurable.todo_category
     task_maistro_role = configurable.task_maistro_role
@@ -333,7 +333,7 @@ def update_profile(state: MessagesState, config: RunnableConfig, store: BaseStor
     """Reflect on the chat history and update the memory collection."""
     
     # Get the user ID from the config
-    configurable = configuration.Configuration.from_runnable_config(config)
+    configurable = configuration.PersonaConfiguration.from_runnable_config(config)
     user_id = configurable.user_id
     todo_category = configurable.todo_category
 
@@ -374,7 +374,7 @@ def update_todos(state: MessagesState, config: RunnableConfig, store: BaseStore)
     """Reflect on the chat history and update the memory collection."""
     
     # Get the user ID from the config
-    configurable = configuration.Configuration.from_runnable_config(config)
+    configurable = configuration.PersonaConfiguration.from_runnable_config(config)
     user_id = configurable.user_id
     todo_category = configurable.todo_category
 
@@ -430,7 +430,7 @@ def update_instructions(state: MessagesState, config: RunnableConfig, store: Bas
     """Reflect on the chat history and update the memory collection."""
     
     # Get the user ID from the config
-    configurable = configuration.Configuration.from_runnable_config(config)
+    configurable = configuration.PersonaConfiguration.from_runnable_config(config)
     user_id = configurable.user_id
     todo_category = configurable.todo_category
     
@@ -478,7 +478,7 @@ def route_message(state: MessagesState, config: RunnableConfig, store: BaseStore
         return END
 
 # Create the graph + all nodes
-builder = StateGraph(MessagesState, config_schema=configuration.Configuration)
+builder = StateGraph(MessagesState, config_schema=configuration.PersonaConfiguration)
 
 # Define the nodes
 builder.add_node("task_mAIstro_with_tools", task_mAIstro_with_tools)

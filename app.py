@@ -6,6 +6,15 @@ from datetime import datetime
 from langchain_core.messages import HumanMessage
 from langgraph_sdk import get_client
 
+# 기업 페르소나 모듈 임포트
+from personas.company_personas import (
+    get_persona_by_id, 
+    get_persona_prompt, 
+    list_available_personas,
+    get_scenarios_by_company,
+    get_scenario
+)
+
 # LangGraph 클라이언트 설정
 URL_FOR_DEPLOYMENT = "http://localhost:2024"  # LangGraph 서버 URL
 try:
@@ -29,34 +38,90 @@ async def generate_company_response_async(message, company_id, scenario_id, assi
         if assistant_id is None:
             # 어시스턴트 목록 조회
             assistants = await client.assistants.search()
+            print(f"어시스턴트 목록: {assistants}")
             
-            # 회사 ID와 시나리오에 맞는 어시스턴트 찾기
+            # 허용된 그래프 ID 목록 - 시스템에 존재하는 그래프 ID들
+            allowed_graph_ids = ["persona_graph"]
+            
+            # 회사 ID와 시나리오에 맞는 어시스턴트 찾기 (graph_id도 확인)
             for assistant in assistants:
                 config = assistant.get("config", {}).get("configurable", {})
-                if config.get("company_id") == company_id and config.get("scenario_id") == scenario_id:
+                graph_id = assistant.get("graph_id", "")
+                
+                # 허용된 그래프 ID인지 확인하고, 회사와 시나리오가 일치하는지 확인
+                if (graph_id in allowed_graph_ids and 
+                    config.get("company_id") == company_id and 
+                    config.get("scenario_id") == scenario_id):
                     assistant_id = assistant["assistant_id"]
+                    print(f"찾은 어시스턴트: {assistant_id}, 그래프 ID: {graph_id}")
                     break
             
-            # 찾지 못했다면 새 어시스턴트 생성
+            # 찾지 못했다면 새 어시스턴트 생성 시도
             if assistant_id is None:
-                # 페르소나 에이전트를 사용하여 응답 생성
-                graph_name = "graph"  # 수정된 그래프 이름
                 st.info(f"회사 '{company_id}'와 시나리오 '{scenario_id}'에 맞는 어시스턴트를 생성합니다.")
                 
-                # PersonaConfiguration 스키마에 맞는 설정 생성
-                assistant = await client.assistants.create(
-                    graph_name,
-                    config={
-                        "configurable": {
-                            # "user_id": st.session_state.nickname,
-                            # "todo_category": company_id,
-                            "company_id": company_id,
-                            "scenario_id": scenario_id,
-                            # "task_maistro_role": f"{company_id} 기업의 CS 담당자로서 고객 응대를 하는 역할"
-                        }
-                    }
-                )
-                assistant_id = assistant["assistant_id"]
+                # 사용 가능한 그래프 ID 확인 (시스템에 이미 존재하는 그래프 ID 우선 사용)
+                available_graph_id = None
+                for graph_id in allowed_graph_ids:
+                    # 시스템 생성 어시스턴트 찾기 (일반적으로 metadata에 created_by: system이 있음)
+                    for assistant in assistants:
+                        if (assistant.get("graph_id") == graph_id and 
+                            assistant.get("metadata", {}).get("created_by") == "system"):
+                            available_graph_id = graph_id
+                            print(f"시스템 어시스턴트에서 그래프 ID 찾음: {available_graph_id}")
+                            break
+                    
+                    if available_graph_id:
+                        break
+                
+                # 시스템 어시스턴트가 없으면 기본값 사용
+                if not available_graph_id:
+                    # 기본적으로 "persona_graph" 사용, 없으면 "graph" 시도
+                    for graph_id in ["persona_graph", "graph", "persona_agent"]:
+                        try:
+                            # 그래프 ID가 존재하는지 테스트
+                            test_assistant = await client.assistants.create(
+                                graph_id,
+                                config={"configurable": {}}
+                            )
+                            await client.assistants.delete(test_assistant["assistant_id"])
+                            available_graph_id = graph_id
+                            print(f"테스트 성공: 사용 가능한 그래프 ID: {available_graph_id}")
+                            break
+                        except Exception as e:
+                            print(f"그래프 ID '{graph_id}' 테스트 실패: {str(e)}")
+                            continue
+                
+                # 사용 가능한 그래프 ID로 어시스턴트 생성
+                if available_graph_id:
+                    try:
+                        # 회사와 시나리오 정보를 가져와서 설정에 포함
+                        company_persona = get_persona_by_id(company_id)
+                        scenario_info = get_scenario(company_id, scenario_id)
+                        
+                        # 어시스턴트 생성 시 추가 정보 포함
+                        assistant = await client.assistants.create(
+                            available_graph_id,
+                            config={
+                                "configurable": {
+                                    "company_id": company_id,
+                                    "scenario_id": scenario_id,
+                                    # 아래 정보는 DB로 옮겨질 예정이지만 현재는 직접 전달
+                                    "company_name": company_persona.name if company_persona else "",
+                                    "company_industry": company_persona.industry if company_persona else "",
+                                    "scenario_title": scenario_info["title"] if scenario_info else "",
+                                    "scenario_description": scenario_info["description"] if scenario_info else ""
+                                }
+                            }
+                        )
+                        assistant_id = assistant["assistant_id"]
+                        print(f"어시스턴트 생성 성공: {assistant_id}, 그래프 ID: {available_graph_id}")
+                    except Exception as e:
+                        st.error(f"어시스턴트 생성 실패: {str(e)}")
+                        return f"죄송합니다. 어시스턴트 생성 중 오류가 발생했습니다: {str(e)}"
+                else:
+                    st.error("사용 가능한 그래프 ID를 찾지 못했습니다.")
+                    return "죄송합니다. 사용 가능한 그래프 ID를 찾지 못했습니다. 관리자에게 문의하세요."
         
         # 쓰레드 생성 또는 기존 쓰레드 사용
         if "thread_id" not in st.session_state:
@@ -68,23 +133,40 @@ async def generate_company_response_async(message, company_id, scenario_id, assi
         
         # 스트리밍으로 응답 받기
         response_chunks = []
+        latest_ai_message = None
+        print("스트리밍 시작...")
+        
         async for chunk in client.runs.stream(
             st.session_state.thread_id,
             assistant_id,
             input=input_data,
             stream_mode="values"
         ):
+            print(f"스트리밍 청크: {chunk}")
+            
             if chunk.event == 'values':
                 state = chunk.data
-                for msg in state.get("messages", []):
-                    if hasattr(msg, "content") and msg.content:
-                        response_chunks.append(msg.content)
+                if 'messages' in state:
+                    # 메시지 배열에서 모든 AI 메시지 검색
+                    for msg in reversed(state['messages']):  # 가장 최근 메시지부터 검색
+                        if msg.get('type') == 'ai' and isinstance(msg.get('content'), str) and msg['content']:
+                            latest_ai_message = msg['content']
+                            # 이미 있는 응답이 아니라면 추가
+                            if latest_ai_message not in response_chunks:
+                                response_chunks.append(latest_ai_message)
+                                print(f"AI 메시지 추가: {latest_ai_message}")
+                            break  # 가장 최근 AI 메시지를 찾았으면 루프 종료
         
-        # 응답 합치기
-        full_response = "".join(response_chunks) if response_chunks else "응답을 생성하지 못했습니다."
-        return full_response
+        # 응답 반환
+        print(f"응답 청크: {response_chunks}")
+        print(f"최종 응답: {latest_ai_message if latest_ai_message else '응답 없음'}")
+        if latest_ai_message:
+            return latest_ai_message
+        else:
+            return "응답을 생성하지 못했습니다."
         
     except Exception as e:
+        print(f"LangGraph API 호출 예외 발생: {str(e)}")
         st.error(f"LangGraph API 호출 중 오류 발생: {str(e)}")
         return f"죄송합니다. 응답 생성 중 오류가 발생했습니다: {str(e)}"
 
@@ -201,64 +283,12 @@ if 'scenario' not in st.session_state:
 if 'nickname' not in st.session_state:
     st.session_state.nickname = None
 
-# 예시 기업 데이터
-companies = [
-    {
-        "id": "skt",
-        "name": "SK텔레콤",
-        "description": "대한민국 1위 이동통신사로 최근 유심 해킹 사태를 겪고 있습니다.",
-        "cs_style": "정중하고 전문적인 어조, 고객 보안을 최우선으로 고려",
-        "industry": "통신"
-    },
-    {
-        "id": "samsung",
-        "name": "삼성전자",
-        "description": "글로벌 전자제품 제조사로 스마트폰, 가전제품 등을 생산합니다.",
-        "cs_style": "친절하고 기술적인 설명에 능숙함, 제품 전문성 강조",
-        "industry": "전자제품"
-    },
-    {
-        "id": "coupang",
-        "name": "쿠팡",
-        "description": "국내 최대 이커머스 플랫폼으로 로켓배송 서비스를 제공합니다.",
-        "cs_style": "신속하고 효율적인 문제 해결, 고객 만족 중심",
-        "industry": "이커머스"
-    }
-]
+# 동적으로 기업 페르소나 데이터 가져오기
+# 하드코딩된 데이터 대신 company_personas 모듈 사용
+companies = list_available_personas()
 
-# 시나리오 데이터
-scenarios = {
-    "skt": [
-        {
-            "id": "usim_protection",
-            "title": "유심 보호 서비스 문의",
-            "description": "최근 유심 해킹 사태와 관련하여 유심 보호 서비스에 대해 문의하는 시나리오",
-            "initial_response": "안녕하세요, SK텔레콤 고객센터입니다. 무엇을 도와드릴까요?"
-        },
-        {
-            "id": "compensation_request",
-            "title": "보상 요구",
-            "description": "해킹 사태로 인한 정신적 피해에 대한 보상을 요구하는 시나리오",
-            "initial_response": "안녕하세요, SK텔레콤입니다. 어떤 문제로 연락주셨나요?"
-        }
-    ],
-    "samsung": [
-        {
-            "id": "device_issue",
-            "title": "제품 불량 문의",
-            "description": "스마트폰 화면 깜빡임 현상에 대해 문의하는 시나리오",
-            "initial_response": "안녕하세요, 삼성전자 고객센터입니다. 어떤 제품에 대해 문의하시나요?"
-        }
-    ],
-    "coupang": [
-        {
-            "id": "delivery_delay",
-            "title": "배송 지연 문의",
-            "description": "로켓배송 상품이 예정일에 도착하지 않은 상황",
-            "initial_response": "안녕하세요, 쿠팡 고객센터입니다. 배송 관련 문의이신가요?"
-        }
-    ]
-}
+# 시나리오 데이터도 동적으로 가져오기
+# 기존의 하드코딩된 scenarios 딕셔너리 대신 get_scenarios_by_company 함수 사용
 
 # 채팅 메시지 추가
 def add_message(message, is_user=True):
@@ -304,16 +334,16 @@ elif st.session_state.page == "company_select":
     
     for i, company in enumerate(companies):
         with cols[i % 3]:
+            # 회사 정보를 company_personas 형식에 맞게 표시
             st.write(f"""
             <div class='company-card'>
                 <div class='company-name'>{company['name']}</div>
                 <div class='company-desc'>{company['description']}</div>
                 <div class='company-info'>산업: {company['industry']}</div>
-                <div class='company-info'>CS 스타일: {company['cs_style']}</div>
             </div>
             """, unsafe_allow_html=True)
             
-            if st.button("선택", key=f"company_{i}"):
+            if st.button("선택", key=f"company_{company['id']}"):
                 st.session_state.company = company
                 st.session_state.page = "scenario_select"
                 st.rerun()
@@ -334,23 +364,31 @@ elif st.session_state.page == "scenario_select":
     
     st.write(f"<div class='subtitle'>{st.session_state.company['name']} - 상황 선택</div>", unsafe_allow_html=True)
     
-    company_scenarios = scenarios.get(st.session_state.company['id'], [])
+    # 회사 ID를 기반으로 시나리오 목록 동적 로드
+    company_scenarios = get_scenarios_by_company(st.session_state.company['id'])
     
-    for i, scenario in enumerate(company_scenarios):
-        st.write(f"""
-        <div class='scenario-box'>
-            <div class='subtitle'>{scenario['title']}</div>
-            <div class='paragraph'>{scenario['description']}</div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        if st.button("이 상황으로 시작", key=f"scenario_{i}"):
-            st.session_state.scenario = scenario
-            st.session_state.chat_messages = []
-            st.session_state.page = "chat"
-            # 초기 인사 추가
-            add_message(scenario['initial_response'], is_user=False)
+    if not company_scenarios:
+        st.warning(f"{st.session_state.company['name']}에 대한 시나리오가 없습니다.")
+        if st.button("다른 기업 선택하기"):
+            st.session_state.company = None
+            st.session_state.page = "company_select"
             st.rerun()
+    else:
+        for i, scenario in enumerate(company_scenarios):
+            st.write(f"""
+            <div class='scenario-box'>
+                <div class='subtitle'>{scenario['title']}</div>
+                <div class='paragraph'>{scenario['description']}</div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            if st.button("이 상황으로 시작", key=f"scenario_{i}"):
+                st.session_state.scenario = scenario
+                st.session_state.chat_messages = []
+                st.session_state.page = "chat"
+                # 초기 인사 추가
+                add_message(scenario['initial_response'], is_user=False)
+                st.rerun()
 
 elif st.session_state.page == "chat":
     # 채팅 페이지

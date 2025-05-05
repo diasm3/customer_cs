@@ -245,7 +245,6 @@ def get_scenario(company_id: str, scenario_id: str) -> Optional[Dict]:
     """특정 기업의 특정 시나리오를 반환합니다."""
     company_scenarios = get_scenarios_by_company(company_id)
     for scenario in company_scenarios:
-        print(f"Checking scenario: {scenario['id']} against {scenario_id}")
         if scenario["id"] == scenario_id:
             return scenario
     return None
