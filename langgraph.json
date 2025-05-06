@@ -1,7 +1,8 @@
 {
   "dockerfile_lines": [],
   "graphs": {
-    "persona_graph": "./agents/persona_agent.py:graph"
+    "persona_graph": "./agents/persona_agent.py:graph",
+    "evaluation_graph": "./agents/evaluation_agent.py:graph"
   },
   "env": "./.env",
   "python_version": "3.11",

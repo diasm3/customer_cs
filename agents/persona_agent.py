@@ -47,7 +47,7 @@ import agents.configuration as configuration
 
 
 # Initialize the model
-model = ChatOpenAI(model="gpt-4.1-nano", temperature=0)
+model = ChatOpenAI(model="gpt-4.1", temperature=0)
 
 # MCP client setup function
 async def setup_mcp_client():
@@ -236,16 +236,26 @@ async def persona_assistant(state: MessagesState, config: RunnableConfig, store:
             # 페르소나 기반 시스템 메시지 구성
             system_msg = f"""당신은 {persona_prompt}
     
-    당신의 역할은 위의 기업 페르소나에 맞게 고객 응대를 하는 것입니다.{scenario_context}
+    당신의 역할은 위의 기업 페르소나에 맞게 고객 응대를 하는 것입니다.
+    
+    <scenario context>
+    {scenario_context}
+    </search context>
     
     고객 정보: 
+    <user_profile>
     {user_profile}
+    </user_profile>
     
     메모:
+    <todo>
     {todo}
+    </todo>
     
     추가 지침:
+    <instructions>
     {instructions}
+    </instructions>
     
     당신은 또한 웹 검색 도구를 사용할 수 있습니다. 고객이 최신 정보나 사실 확인이 필요한 질문을 할 경우, 검색 도구를 사용하세요.
     검색 결과는 기업의 톤앤매너와 원칙에 맞게 전달하세요.
