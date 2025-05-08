@@ -1,17 +1,24 @@
 import uuid
+import re
+import json
+import copy  # copy 모듈 추가
 from datetime import datetime
 
+import asyncio
 from pydantic import BaseModel, Field
 
 from trustcall import create_extractor
 
-from typing import Literal, Optional, TypedDict, Any, Dict
+from typing import Literal, Optional, TypedDict, Any, Dict, List
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import merge_message_runs
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage 
 
-from langchain_openai import ChatOpenAI
+# Transformers 및 토치 임포트 추가
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig  # GenerationConfig 추가
+from peft import PeftModel  # PeftModel 추가
 
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, MessagesState, START, END
@@ -44,10 +51,202 @@ from data.personas.company_personas import (
 import agents.configuration as configuration
 
 
+# 모델 타입 정의
+MODEL_TYPE = Literal["solar", "qwen3"]
 
+# SOLAR 모델 초기화 - Transformers 라이브러리 사용
+print("로컬에서 모델 로딩 준비 중...")
 
-# Initialize the model
-model = ChatOpenAI(model="gpt-4.1", temperature=0)
+# 전역 변수로 모델 및 토크나이저 선언
+tokenizer = None
+model = None
+qwen3_tokenizer = None
+qwen3_model = None
+
+# 모델 로딩 함수 정의
+def load_solar_model():
+    global tokenizer, model
+    try:
+        # 모델이 이미 로드되었는지 확인
+        if tokenizer is not None and model is not None:
+            return
+            
+        # 토크나이저 및 모델 로드
+        tokenizer = AutoTokenizer.from_pretrained("Upstage/SOLAR-10.7B-Instruct-v1.0")
+        model = AutoModelForCausalLM.from_pretrained(
+            "Upstage/SOLAR-10.7B-Instruct-v1.0",
+            device_map="auto",
+            torch_dtype=torch.float16,
+        )
+        print("SOLAR 모델 로딩 완료!")
+    except Exception as e:
+        print(f"SOLAR 모델 로딩 중 오류 발생: {str(e)}")
+        raise
+
+# Qwen3 모델 로딩 함수 정의
+def load_qwen3_model():
+    global qwen3_tokenizer, qwen3_model
+    try:
+        # 모델이 이미 로드되었는지 확인
+        if qwen3_tokenizer is not None and qwen3_model is not None:
+            return
+            
+        # 기본 모델 및 파인튜닝된 모델 경로
+        base_model = "Qwen/Qwen3-4B"
+        output_dir = "./models/skt_persona_qwen3_final"
+        
+        # 파인튜닝된 Qwen3 모델 로드
+        qwen3_tokenizer = AutoTokenizer.from_pretrained(output_dir, trust_remote_code=True)
+        
+        # 기본 모델 로드 후 어댑터 적용
+        base_model_instance = AutoModelForCausalLM.from_pretrained(
+            base_model,
+            device_map="auto",
+            torch_dtype=torch.float16,
+            trust_remote_code=True
+        )
+        
+        # PeftModel을 사용하여 어댑터 로드
+        qwen3_model = PeftModel.from_pretrained(base_model_instance, output_dir)
+        qwen3_model.eval()
+        
+        print("Qwen3 모델 로딩 완료!")
+    except Exception as e:
+        print(f"Qwen3 모델 로딩 중 오류 발생: {str(e)}")
+        raise
+
+# 비동기적으로 SOLAR 모델을 사용하여 응답 생성
+async def generate_solar_response(messages, temperature=0.2, max_length=4096):
+    """SOLAR 모델을 사용하여 메시지에 대한 응답을 생성합니다."""
+    try:
+        # 모델이 로드되었는지 확인
+        if tokenizer is None or model is None:
+            # 별도 스레드에서 모델 로드
+            await asyncio.to_thread(load_solar_model)
+        
+        # 채팅 형식으로 변환
+        conversation = []
+        for msg in messages:
+            if isinstance(msg, SystemMessage):
+                conversation.append({"role": "system", "content": msg.content})
+            elif isinstance(msg, HumanMessage):
+                conversation.append({"role": "user", "content": msg.content})
+            elif isinstance(msg, AIMessage):
+                conversation.append({"role": "assistant", "content": msg.content})
+            elif getattr(msg, 'role', None) == 'tool':
+                # 도구 응답은 사용자 메시지처럼 처리
+                conversation.append({"role": "user", "content": f"도구 응답: {msg.content}"})
+        
+        # 프롬프트 생성
+        prompt = await asyncio.to_thread(
+            lambda: tokenizer.apply_chat_template(conversation, tokenize=False, add_generation_prompt=True)
+        )
+        
+        # 모델 입력 토큰화
+        inputs = await asyncio.to_thread(
+            lambda: tokenizer(prompt, return_tensors="pt").to(model.device)
+        )
+        
+        # 생성 매개변수 설정 - 수정된 방식
+        # 방법 1: 직접 파라미터 전달 방식
+        generation_kwargs = {
+            "do_sample": True,
+            "temperature": temperature,
+            "max_length": max_length,
+            "repetition_penalty": 1.1,
+            "top_p": 0.95
+        }
+        
+        # 응답 생성 - 직접 매개변수 사용
+        outputs = await asyncio.to_thread(
+            lambda: model.generate(**inputs, **generation_kwargs)
+        )
+        
+        # 결과 디코딩
+        output_text = await asyncio.to_thread(
+            lambda: tokenizer.decode(outputs[0], skip_special_tokens=True)
+        )
+        
+        # 원본 프롬프트 제거하여 실제 응답만 추출
+        response_only = output_text[len(prompt):].strip()
+        
+        print(f"SOLAR 생성 결과: {response_only}")
+        return response_only
+        
+    except Exception as e:
+        print(f"SOLAR 응답 생성 중 오류 발생: {str(e)}")
+        return f"죄송합니다, 응답을 생성하는 중에 오류가 발생했습니다: {str(e)}"
+
+# 비동기적으로 Qwen3 모델을 사용하여 응답 생성
+async def generate_qwen3_response(messages, temperature=0.2, max_length=4096):
+    """Qwen3 모델을 사용하여 메시지에 대한 응답을 생성합니다."""
+    try:
+        # 모델이 로드되었는지 확인
+        if qwen3_tokenizer is None or qwen3_model is None:
+            # 별도 스레드에서 모델 로드
+            await asyncio.to_thread(load_qwen3_model)
+        
+        # 채팅 형식으로 변환
+        conversation = []
+        for msg in messages:
+            if isinstance(msg, SystemMessage):
+                conversation.append({"role": "system", "content": msg.content})
+            elif isinstance(msg, HumanMessage):
+                conversation.append({"role": "user", "content": msg.content})
+            elif isinstance(msg, AIMessage):
+                conversation.append({"role": "assistant", "content": msg.content})
+            elif getattr(msg, 'role', None) == 'tool':
+                # 도구 응답은 사용자 메시지처럼 처리
+                conversation.append({"role": "user", "content": f"도구 응답: {msg.content}"})
+        
+        # 프롬프트 생성
+        prompt = await asyncio.to_thread(
+            lambda: qwen3_tokenizer.apply_chat_template(conversation, tokenize=False, add_generation_prompt=True)
+        )
+        
+        # 모델 입력 토큰화
+        inputs = await asyncio.to_thread(
+            lambda: qwen3_tokenizer(prompt, return_tensors="pt").to(qwen3_model.device)
+        )
+        
+        # 생성 매개변수 설정
+        generation_kwargs = {
+            "do_sample": True,
+            "temperature": temperature,
+            "max_length": max_length,
+            "repetition_penalty": 1.1,
+            "top_p": 0.95
+        }
+        
+        # 응답 생성
+        outputs = await asyncio.to_thread(
+            lambda: qwen3_model.generate(**inputs, **generation_kwargs)
+        )
+        
+        # 결과 디코딩
+        output_text = await asyncio.to_thread(
+            lambda: qwen3_tokenizer.decode(outputs[0], skip_special_tokens=True)
+        )
+        
+        # 원본 프롬프트 제거하여 실제 응답만 추출
+        response_only = output_text[len(prompt):].strip()
+        
+        print(f"Qwen3 생성 결과: {response_only}")
+        return response_only
+        
+    except Exception as e:
+        print(f"Qwen3 응답 생성 중 오류 발생: {str(e)}")
+        return f"죄송합니다, 응답을 생성하는 중에 오류가 발생했습니다: {str(e)}"
+
+# 선택한 모델에 따라 응답 생성
+async def generate_model_response(messages, model_type: MODEL_TYPE = "qwen3", temperature=0.2, max_length=4096):
+    """선택된 모델 타입에 따라 적절한 모델을 사용하여 응답을 생성합니다."""
+    if model_type == "solar":
+        return await generate_solar_response(messages, temperature, max_length)
+    elif model_type == "qwen3":
+        return await generate_qwen3_response(messages, temperature, max_length)
+    else:
+        raise ValueError(f"지원되지 않는 모델 타입입니다: {model_type}")
 
 # MCP client setup function
 async def setup_mcp_client():
@@ -62,17 +261,17 @@ async def setup_mcp_client():
                     "x-subscription-token": "BSAr3F0nX--2BIzA9UuHboU56Pi62E6"
                 }
             },
-            "neo4j-aura": {
-                "command": "uvx",
-                "args": ["mcp-neo4j-cypher@0.2.1"],
-                "env": {
-                    "NEO4J_URI": "bolt://localhost:7687",
-                    "NEO4J_USERNAME": "neo4j",
-                    "NEO4J_PASSWORD": "password123",
-                    "NEO4J_DATABASE": "neo4j"
-                },
-                "transport": "stdio",
-            },
+            # "neo4j-aura": {
+            #     "command": "uvx",
+            #     "args": ["mcp-neo4j-cypher@0.2.1"],
+            #     "env": {
+            #         "NEO4J_URI": "bolt://localhost:7687",
+            #         "NEO4J_USERNAME": "neo4j",
+            #         "NEO4J_PASSWORD": "password123",
+            #         "NEO4J_DATABASE": "neo4j"
+            #     },
+            #     "transport": "stdio",
+            # },
         }
     )
     await client.__aenter__()
@@ -158,6 +357,7 @@ async def persona_assistant(state: MessagesState, config: RunnableConfig, store:
     todo_category = configurable.todo_category
     company_id = configurable.company_id
     scenario_id = configurable.scenario_id
+    model_type = getattr(configurable, 'model_type', "qwen3")  # 기본값은 SOLAR 모델
 
     # Neo4j 객체 생성은 동기적이지만 실제 DB 연결이나 쿼리는 비동기 처리
     # 싱글톤 패턴 활용
@@ -261,15 +461,31 @@ async def persona_assistant(state: MessagesState, config: RunnableConfig, store:
     검색 결과는 기업의 톤앤매너와 원칙에 맞게 전달하세요.
     """
             
-            # Respond using memory, chat history, and MCP tools - use ainvoke instead of invoke
-            response = await model.bind_tools(all_tools, parallel_tool_calls=True).ainvoke(
-                [SystemMessage(content=system_msg)] + state["messages"]
-            )
+            # SOLAR 또는 Qwen3 모델 사용하여 응답 생성
+            messages = [SystemMessage(content=system_msg)] + state["messages"]
             
-            # 비동기적으로 대화 로그 저장
-            await async_save_conversation_log(state, response, conversation_context)
-            
-            return {"messages": [response]}
+            try:
+                # 선택된 모델을 사용하여 응답 생성
+                response_text = await generate_model_response(messages, model_type)
+                
+                # 도구 호출 확인 및 추출
+                # tool_calls = extract_tool_calls(response_text)
+                
+                # AIMessage 생성
+                ai_message = AIMessage(content=response_text)
+                
+                # 도구 호출이 있다면 추가
+                # if tool_calls:
+                #     ai_message.tool_calls = tool_calls
+                
+                # 비동기적으로 대화 로그 저장
+                await async_save_conversation_log(state, ai_message, conversation_context)
+                
+                return {"messages": [ai_message]}
+            except Exception as e:
+                print(f"모델 응답 생성 오류: {str(e)}")
+                error_msg = f"죄송합니다, 응답을 생성하는 중에 문제가 발생했습니다: {str(e)}"
+                return {"messages": [AIMessage(content=error_msg)]}
         finally:
             await client.__aexit__(None, None, None)
     finally:
