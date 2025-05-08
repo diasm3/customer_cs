@@ -1,5 +1,5 @@
 **/.claude/settings.local.json
-./langgraph_api/**
+.langgraph_api/
 .env
 __pycache__/
 **/__pycache__/
@@ -7,3 +7,4 @@ __pycache__/
 *$py.class
 graphDB/
 neo4j/
+models/
